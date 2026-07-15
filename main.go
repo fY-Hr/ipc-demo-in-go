@@ -3,24 +3,25 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"os"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 )
 
-func main(){
+func main() {
 	if len(os.Args) > 1 && os.Args[1] == "child" {
+		fmt.Printf("%v", os.Args)
+		fmt.Printf("%v", os.Args[0])
 		runChildProcess()
 		return
 	}
 
 	runParentProcess()
-} 
-
+}
 
 func runParentProcess() {
-	fmt.Println("[Parent] initializing...")
+	fmt.Println("[Parent] Initializing...")
 
 	execPath, err := os.Executable()
 	if err != nil {
@@ -29,70 +30,118 @@ func runParentProcess() {
 
 	cmd := exec.Command(execPath, "child")
 
-	// defining stdin pipe
+	// Request the kernel to create a pipe connected to the child's stdin.
+	// The parent receives the write end of the pipe (io.WriteCloser),
+	// while the child receives the read end as its os.Stdin.
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
-		log.Fatalf("[Parent] Failed to get the stdin pipe: %v", err)
+		log.Fatalf("[Parent] Failed to get stdin pipe: %v", err)
 	}
 
-	// defining stdout pipe
+	// Request the kernel to create another pipe connected to the child's stdout.
+	// The parent receives the read end of the pipe (io.ReadCloser),
+	// while the child writes to the other end through os.Stdout.
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		log.Fatalf("[Parent] Failed to get the stdout pipe: %v", err)
+		log.Fatalf("[Parent] Failed to get stdout pipe: %v", err)
 	}
 
-	// starting the child process
+	// By default, a process's stdin and stdout are connected to the terminal.
+	// When using StdinPipe() and StdoutPipe(), the child's standard streams
+	// are redirected to kernel-managed pipes instead.
+	//
+	// Parent                                         Child
+	// ------                                         -----
+	// stdinPipe (Write) ---> [Kernel Pipe] -------> os.Stdin
+	// os.Stdout <------- [Kernel Pipe] <------ stdoutPipe (Read)
+	//
+	// These pipes live in kernel-managed memory (RAM), not on disk.
+	//
+	// Parent and child are completely separate processes.
+	// They do not share variables or memory.
+	// All communication happens through these kernel-managed pipes.
+
+	// Start launches a completely new process using the same executable.
+	// Parent and child are now running concurrently with separate memory.
 	if err := cmd.Start(); err != nil {
 		log.Fatalf("[Parent] Failed to start child process: %v", err)
 	}
-	
-	message := "Hello from the parent process!"
+
+	message := "aaaa!"
 	fmt.Printf("[Parent] Sending message: %s\n", message)
 
-	// sending the message via stdinPipe
+	// fmt.Fprintln converts the message into bytes, appends '\n',
+	// and writes them into stdinPipe.
+	//
+	// Data flow:
+	// Parent -> stdinPipe -> Kernel Pipe -> Child os.Stdin
 	_, err = fmt.Fprintln(stdinPipe, message)
 	if err != nil {
 		log.Fatalf("[Parent] Failed to write to stdin pipe: %v", err)
 	}
-	// close the pipe to signal the EOF (End Of File) to the child process
+
+	// Closing the write end signals EOF to the child.
+	// Without this, the child may continue waiting for more input.
 	stdinPipe.Close()
 
-	// reading a response from the child process via the stdout pipe wrapped inside NewScanner
+	// stdoutPipe is an io.ReadCloser. It does not store data itself;
+	// it simply reads bytes from the kernel pipe.
+	//
+	// Scanner wraps this reader and:
+	//   - reads bytes from stdoutPipe,
+	//   - keeps its own internal buffer,
+	//   - splits the byte stream into lines by default.
 	scanner := bufio.NewScanner(stdoutPipe)
+
 	if scanner.Scan() {
 		response := scanner.Text()
 		fmt.Printf("[Parent] Received response: %s\n", response)
 	}
 
+	if err := scanner.Err(); err != nil {
+		log.Fatalf("[Parent] Failed reading child output: %v", err)
+	}
+
+	// Wait blocks until the child process completely exits.
+	// It does NOT read data from the pipe; it simply waits for
+	// the kernel to report that the child has terminated.
 	if err := cmd.Wait(); err != nil {
 		log.Fatalf("[Parent] Child process exited with error: %v", err)
 	}
 
-	fmt.Println("[Parent] Child process ternmminated. IPC complete.")
+	fmt.Println("[Parent] Child process terminated. IPC complete.")
 }
 
 func runChildProcess() {
+	// stderr is still connected to the terminal because we only redirected
+	// stdin and stdout. This is why these messages appear directly
+	// in the terminal instead of going through the parent.
 	fmt.Fprintln(os.Stderr, "[Child] Initialized and listening...")
 
-	// checking the message from the parent via standard input
+	// In this child process, os.Stdin is no longer connected to the keyboard.
+	// It is connected to the read end of the kernel pipe created by the parent.
 	scanner := bufio.NewScanner(os.Stdin)
+
 	if scanner.Scan() {
-		// if the scanner is valid, get the Text of the scanner (the message from the parent)
+		// Scan() reads the next line from os.Stdin.
+		// Text() returns the line that was read.
 		receivedMessage := scanner.Text()
+
 		fmt.Fprintf(os.Stderr, "[Child] Message received: %s\n", receivedMessage)
 
-		processedResponse := strings.ToUpper(receivedMessage) + " -  RECEIVED"
+		processedResponse := strings.ToUpper(receivedMessage) + " - RECEIVED"
 
-		// write back to the parent via standard output
-		// fyi: in go, the functions within fmt, are explicitly designed to write the os.Stdout by default, so we can use it.
-
-		// noticed in runParentProcess we are reading from stdout pipe
+		// fmt.Println writes to os.Stdout.
+		// Since the child's stdout was redirected, this output goes into
+		// the kernel pipe instead of the terminal.
+		//
+		// Data flow:
+		// Child os.Stdout -> Kernel Pipe -> stdoutPipe -> Parent Scanner
 		fmt.Printf("[Child] Message acknowledged: %s\n", processedResponse)
 		fmt.Println(processedResponse)
 	}
 
 	if err := scanner.Err(); err != nil {
-		fmt.Println("[Child] Failed scanning the text from scanner")
+		fmt.Fprintln(os.Stderr, "[Child] Failed scanning stdin:", err)
 	}
-
 }
