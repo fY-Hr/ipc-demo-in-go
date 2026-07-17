@@ -118,6 +118,12 @@ func runChildProcess() {
 	// in the terminal instead of going through the parent.
 	fmt.Fprintln(os.Stderr, "[Child] Initialized and listening...")
 
+	// Fprintln is a function that allows us to write something into any io.Writer. We can put the io.Writer on the
+	// first parameter of the function. and yeah, because the output streamline of the os.Stderr is still directed 
+	// into the terminal, we can use it to print out the process info message.
+
+	// fyi: F in Fprintln stand for File, but now it can be any io.Writer instead of just a file
+
 	// In this child process, os.Stdin is no longer connected to the keyboard.
 	// It is connected to the read end of the kernel pipe created by the parent.
 	scanner := bufio.NewScanner(os.Stdin)
